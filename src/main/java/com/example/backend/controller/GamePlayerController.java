@@ -502,6 +502,71 @@ public class GamePlayerController {
         }
     }
 
+    @PostMapping("/order/{orderId}/reject")
+    @PreAuthorize("hasRole('PLAYER')")
+    @Transactional(isolation = Isolation.SERIALIZABLE)
+    @Operation(summary = "Player từ chối đơn thuê (Order)")
+    public ResponseEntity<ApiResponse<?>> rejectOrder(
+            @PathVariable Long orderId,
+            Authentication authentication) {
+        try {
+            User player = userService.findByUsername(authentication.getName());
+            Order order = orderRepository.findById(orderId)
+                .orElseThrow(() -> new ResourceNotFoundException("Order not found"));
+            GamePlayer gamePlayer = order.getPlayer();
+
+            // Kiểm tra quyền từ chối (player phải là người được thuê)
+            if (!gamePlayer.getUser().getId().equals(player.getId())) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                    .body(new ApiResponse<>(false, "Bạn không có quyền từ chối đơn này", null));
+            }
+
+            // Chỉ cho phép từ chối khi đơn đang chờ xác nhận
+            if (!"PENDING".equals(order.getStatus())) {
+                return ResponseEntity.badRequest()
+                    .body(new ApiResponse<>(false, "Chỉ có thể từ chối đơn khi đang chờ xác nhận", null));
+            }
+
+            // Hoàn lại coin cho người thuê (vì đã trừ khi tạo đơn)
+            User renter = order.getRenter();
+            renter.setCoin(renter.getCoin() + order.getPrice());
+            userService.save(renter);
+
+            // Cập nhật trạng thái player
+            gamePlayer.setStatus("AVAILABLE");
+            gamePlayer.setHiredBy(null);
+            gamePlayer.setHireDate(null);
+            gamePlayer.setReturnDate(null);
+            gamePlayer.setHoursHired(null);
+            gamePlayerService.save(gamePlayer);
+
+            // Cập nhật trạng thái đơn
+            order.setStatus("REJECTED");
+            orderRepository.save(order);
+
+            // Gửi notification cho người thuê khi player từ chối đơn
+            notificationService.createNotification(
+                order.getRenter().getId(),
+                "Đơn thuê bị từ chối",
+                "Đơn thuê của bạn đã bị từ chối bởi player " + gamePlayer.getUsername() + ".",
+                "rent_reject",
+                null,
+                order.getId().toString()
+            );
+
+            Map<String, Object> response = new HashMap<>();
+            response.put("gamePlayer", gamePlayer);
+            response.put("order", order);
+            response.put("refundedCoin", order.getPrice());
+
+            return ResponseEntity.ok(new ApiResponse<>(true, "Từ chối đơn thuê thành công", response));
+        } catch (Exception e) {
+            log.error("Error rejecting order: {}", e.getMessage());
+            return ResponseEntity.badRequest()
+                .body(new ApiResponse<>(false, "Error rejecting order: " + e.getMessage(), null));
+        }
+    }
+
     @PostMapping("/order/{orderId}/cancel")
     @PreAuthorize("hasRole('USER')")
     @Transactional(isolation = Isolation.SERIALIZABLE)
